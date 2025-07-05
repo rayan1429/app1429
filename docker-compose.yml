@@ -1,0 +1,220 @@
+version: '3.8'
+
+services:
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf:/etc/nginx/conf.d
+      - ./nginx/certs:/etc/nginx/certs
+    depends_on:
+      - api
+      - public-profiles
+      - customer-portal
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # FastAPI Backend
+  api:
+    build: 
+      context: ./api
+      dockerfile: Dockerfile
+    volumes:
+      - ./api:/app
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/petfinder
+      - REDIS_URL=redis://redis:6379/0
+      - SUPABASE_URL=http://supabase-kong:8000
+      - SUPABASE_KEY=your-supabase-anon-key
+      - SUPABASE_SERVICE_KEY=your-supabase-service-key
+      - JWT_SECRET=your-jwt-secret
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+    networks:
+      - app-network
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # PostgreSQL Database
+  db:
+    image: postgres:14
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=petfinder
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Redis for caching
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - app-network
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  # Supabase services
+  supabase-db:
+    image: supabase/postgres:14.1.0
+    environment:
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - supabase-db-data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  supabase-studio:
+    image: supabase/studio:latest
+    ports:
+      - "3000:3000"
+    depends_on:
+      - supabase-kong
+    environment:
+      SUPABASE_URL: http://localhost:8000
+      STUDIO_PG_META_URL: http://supabase-meta:8080
+      SUPABASE_SERVICE_KEY: your-service-key
+      SUPABASE_ANON_KEY: your-anon-key
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  supabase-kong:
+    image: kong:2.8.1-alpine
+    ports:
+      - "8000:8000"
+    networks:
+      - app-network
+    restart: unless-stopped
+    depends_on:
+      - supabase-auth
+      - supabase-storage
+    environment:
+      KONG_DATABASE: 'off'
+      KONG_DECLARATIVE_CONFIG: /kong.yml
+    volumes:
+      - ./supabase/kong.yml:/kong.yml:ro
+
+  supabase-auth:
+    image: supabase/gotrue:latest
+    depends_on:
+      - supabase-db
+    environment:
+      DB_DRIVER: postgres
+      API_EXTERNAL_URL: http://localhost:8000
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://postgres:postgres@supabase-db:5432/postgres
+      JWT_SECRET: your-jwt-secret
+      GOTRUE_JWT_SECRET: your-jwt-secret
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_SMTP_HOST: mail
+      GOTRUE_SMTP_PORT: 1025
+      GOTRUE_SMTP_SENDER_NAME: GoTrue
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  supabase-storage:
+    image: supabase/storage-api:latest
+    depends_on:
+      - supabase-db
+    environment:
+      ANON_KEY: your-anon-key
+      SERVICE_KEY: your-service-key
+      POSTGREST_URL: http://supabase-rest:3000
+      PGRST_JWT_SECRET: your-jwt-secret
+      DATABASE_URL: postgres://postgres:postgres@supabase-db:5432/postgres
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+    volumes:
+      - supabase-storage-data:/var/lib/storage
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  supabase-rest:
+    image: postgrest/postgrest:latest
+    depends_on:
+      - supabase-db
+    environment:
+      PGRST_DB_URI: postgres://postgres:postgres@supabase-db:5432/postgres
+      PGRST_JWT_SECRET: your-jwt-secret
+      PGRST_DB_SCHEMA: public,storage
+      PGRST_DB_ANON_ROLE: anon
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  supabase-meta:
+    image: supabase/postgres-meta:latest
+    depends_on:
+      - supabase-db
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: supabase-db
+      PG_META_DB_PASSWORD: postgres
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Next.js for public profiles
+  public-profiles:
+    build:
+      context: ./public-profiles
+      dockerfile: Dockerfile
+    volumes:
+      - ./public-profiles:/app
+    environment:
+      - API_URL=http://api:8000
+    ports:
+      - "3001:3000"
+    depends_on:
+      - api
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # React app for customer portal
+  customer-portal:
+    build:
+      context: ./customer-portal
+      dockerfile: Dockerfile
+    volumes:
+      - ./customer-portal:/app
+    environment:
+      - REACT_APP_API_URL=http://api:8000
+    ports:
+      - "3002:3000"
+    depends_on:
+      - api
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  supabase-db-data:
+  supabase-storage-data:
